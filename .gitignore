@@ -16,5 +16,3 @@ runs/
 outputs/
 *.pt
 
-# Data
-data/
