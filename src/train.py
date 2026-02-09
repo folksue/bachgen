@@ -1,8 +1,6 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Tuple
-
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -12,15 +10,35 @@ from .model import ChoraleTransformerLM, ModelConfig
 from .representation import ChoraleTokenizer
 
 
-def split_sequences(sequences, train_ratio: float) -> Tuple[list, list]:
-    cut = int(len(sequences) * train_ratio)
-    return sequences[:cut], sequences[cut:]
+def _compute_entropy(counts: torch.Tensor) -> float:
+    total = counts.sum().item()
+    if total == 0:
+        return 0.0
+    probs = counts[counts > 0].float() / total
+    entropy = -(probs * torch.log(probs)).sum().item()
+    return entropy / torch.log(torch.tensor(2.0)).item()
 
 
-def train_epoch(model, loader, optimizer, device, pad_id):
+def _ngram_repeat_rate(tokens: torch.Tensor, n: int) -> float:
+    if tokens.numel() < n:
+        return 0.0
+    values = tokens.tolist()
+    total = 0
+    seen = {}
+    for i in range(len(values) - n + 1):
+        ng = tuple(values[i : i + n])
+        seen[ng] = seen.get(ng, 0) + 1
+        total += 1
+    repeats = sum(c - 1 for c in seen.values() if c > 1)
+    return repeats / max(1, total)
+
+
+def train_epoch(model, loader, optimizer, device, pad_id, vocab_size, max_metric_tokens=100000):
     model.train()
     total_loss = 0.0
     loss_fn = nn.CrossEntropyLoss(ignore_index=pad_id)
+    metric_tokens = []
+    kept = 0
     for x, y in loader:
         x = x.to(device)
         y = y.to(device)
@@ -31,21 +49,21 @@ def train_epoch(model, loader, optimizer, device, pad_id):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         total_loss += loss.item()
-    return total_loss / max(1, len(loader))
-
-
-def eval_epoch(model, loader, device, pad_id):
-    model.eval()
-    total_loss = 0.0
-    loss_fn = nn.CrossEntropyLoss(ignore_index=pad_id)
-    with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device)
-            y = y.to(device)
-            logits = model(x)
-            loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
-            total_loss += loss.item()
-    return total_loss / max(1, len(loader))
+        if kept < max_metric_tokens:
+            flat = y.view(-1)
+            flat = flat[flat != pad_id].detach().cpu()
+            if flat.numel() > 0:
+                remaining = max_metric_tokens - kept
+                metric_tokens.append(flat[:remaining])
+                kept += min(remaining, flat.numel())
+    avg_loss = total_loss / max(1, len(loader))
+    if not metric_tokens:
+        return avg_loss, 0.0, 0.0
+    tokens = torch.cat(metric_tokens)
+    counts = torch.bincount(tokens, minlength=vocab_size)
+    entropy_bits = _compute_entropy(counts)
+    repeat_4gram = _ngram_repeat_rate(tokens, 4)
+    return avg_loss, entropy_bits, repeat_4gram
 
 
 def main() -> None:
@@ -67,26 +85,28 @@ def main() -> None:
     tokenizer = ChoraleTokenizer()
     chorales = load_chorale_folder(data_dir)
     sequences = build_token_sequences(chorales, tokenizer)
-    train_seqs, val_seqs = split_sequences(sequences, 0.9)
 
-    train_ds = CausalDataset(train_seqs, args.seq_len, args.stride, tokenizer.pad_id)
-    val_ds = CausalDataset(val_seqs, args.seq_len, args.stride, tokenizer.pad_id)
-
+    train_ds = CausalDataset(sequences, args.seq_len, args.stride, tokenizer.pad_id)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
     config = ModelConfig(vocab_size=tokenizer.vocab_size, max_len=args.seq_len)
     model = ChoraleTransformerLM(config).to(args.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    best_val = float("inf")
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, args.device, tokenizer.pad_id)
-        val_loss = eval_epoch(model, val_loader, args.device, tokenizer.pad_id)
-        if val_loss < best_val:
-            best_val = val_loss
-            torch.save(model.state_dict(), out_dir / "model.pt")
-        print(f"epoch {epoch} train {train_loss:.4f} val {val_loss:.4f}")
+        train_loss, entropy_bits, repeat_4gram = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            args.device,
+            tokenizer.pad_id,
+            tokenizer.vocab_size,
+        )
+        torch.save(model.state_dict(), out_dir / "model.pt")
+        print(
+            f"epoch {epoch} train {train_loss:.4f} "
+            f"entropy_bits {entropy_bits:.3f} repeat4 {repeat_4gram:.3f}"
+        )
 
     with open(out_dir / "tokenizer.json", "w", encoding="utf-8") as f:
         json.dump({

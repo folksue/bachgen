@@ -17,7 +17,7 @@ def load_chorale_csv(path: Path) -> List[List[int]]:
 
 def load_chorale_folder(data_dir: Path) -> List[List[List[int]]]:
     chorales: List[List[List[int]]] = []
-    for csv_path in sorted(data_dir.glob("*.csv")):
+    for csv_path in sorted(data_dir.rglob("*.csv")):
         chorales.append(load_chorale_csv(csv_path))
     return chorales
 
