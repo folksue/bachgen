@@ -43,7 +43,7 @@ def generate_tokens(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--checkpoint", type=str, required=True,default="runs/from_scratch/model_epoch_20.pt")
     parser.add_argument("--out-dir", type=str, required=True)
     parser.add_argument("--max-steps", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -73,6 +73,8 @@ def main() -> None:
     if config_path.exists():
         with open(config_path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
+        allowed = set(ModelConfig.__dataclass_fields__.keys())
+        cfg = {k: v for k, v in cfg.items() if k in allowed}
         config = ModelConfig(**cfg)
     else:
         config = ModelConfig(vocab_size=tokenizer.vocab_size)

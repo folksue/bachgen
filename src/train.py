@@ -1,13 +1,23 @@
 import argparse
 import json
 from pathlib import Path
+import sys
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from .dataset import build_token_sequences, load_chorale_folder, CausalDataset
-from .model import ChoraleTransformerLM, ModelConfig
-from .representation import ChoraleTokenizer
+# Allow running as a script (python src/train.py) by falling back to absolute imports
+try:
+    from .dataset import build_token_sequences, load_chorale_folder, CausalDataset
+    from .model import ChoraleTransformerLM, ModelConfig
+    from .representation import ChoraleTokenizer
+except ImportError:
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from src.dataset import build_token_sequences, load_chorale_folder, CausalDataset
+    from src.model import ChoraleTransformerLM, ModelConfig
+    from src.representation import ChoraleTokenizer
 
 
 def _compute_entropy(counts: torch.Tensor) -> float:
@@ -92,6 +102,8 @@ def main() -> None:
     config = ModelConfig(vocab_size=tokenizer.vocab_size, max_len=args.seq_len)
     model = ChoraleTransformerLM(config).to(args.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    best_loss = float("inf")
+    best_epoch = 0
 
     for epoch in range(1, args.epochs + 1):
         train_loss, entropy_bits, repeat_4gram = train_epoch(
@@ -102,7 +114,10 @@ def main() -> None:
             tokenizer.pad_id,
             tokenizer.vocab_size,
         )
-        torch.save(model.state_dict(), out_dir / "model.pt")
+        if train_loss < best_loss:
+            best_loss = train_loss
+            best_epoch = epoch
+            torch.save(model.state_dict(), out_dir / f"model_epoch_{epoch}.pt")
         print(
             f"epoch {epoch} train {train_loss:.4f} "
             f"entropy_bits {entropy_bits:.3f} repeat4 {repeat_4gram:.3f}"
@@ -126,6 +141,8 @@ def main() -> None:
             "n_layer": config.n_layer,
             "dropout": config.dropout,
             "max_len": config.max_len,
+            "best_epoch": best_epoch,
+            "best_loss": best_loss,
         }, f, indent=2)
 
 
