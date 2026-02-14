@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BachGen 流式生成</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 24px; background:#0b0f17; color:#e6e8ee; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    button { background:#2b6cff; border:0; color:white; padding:10px 14px; border-radius:10px; cursor:pointer; }
+    button.secondary { background:#293042; }
+    button.ghost { background: transparent; border:1px solid #2a3346; }
+    button:disabled { opacity: .6; cursor:not-allowed; }
+    input { background:#111827; border:1px solid #2a3346; color:#e6e8ee; padding:10px 12px; border-radius:10px; }
+    input[type="range"] { padding: 0; height: 36px; }
+    .card { margin-top:16px; padding:16px; border:1px solid #253047; border-radius:14px; background:#0f1524; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; white-space: pre-wrap; }
+    a { color:#7cb4ff; }
+    .small { opacity:.85; font-size: 13px; }
+    label { font-size: 13px; opacity:.9; }
+    canvas { width: 100%; height: 320px; background:#0b1020; border:1px solid #253047; border-radius:14px; display:block; }
+    .pill { padding: 6px 10px; border: 1px solid #2a3346; border-radius: 999px; background:#0b1020; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
+</head>
+<body>
+  <h1>BachGen 流式生成</h1>
+
+  <div class="row">
+    <button id="startBtn">开始生成</button>
+    <button id="stopBtn" class="secondary" disabled>停止</button>
+    <label class="row" style="gap:8px;">
+      <input type="checkbox" id="autoPlay" checked />
+      自动播放最新片段
+    </label>
+  </div>
+
+  <div class="card">
+    <div class="row" style="align-items:flex-end;">
+      <div>
+        <label>checkpoint</label><br/>
+        <input id="ckpt" style="min-width:420px" value="runs/from_scratch/model_epoch_20.pt" />
+      </div>
+      <div>
+        <label>max_steps</label><br/>
+        <input id="maxSteps" style="width:120px" value="512" />
+      </div>
+      <div>
+        <label>token_delay_ms</label><br/>
+        <input id="delayMs" style="width:140px" value="40" />
+      </div>
+      <div>
+        <label>flush_every_steps</label><br/>
+        <input id="flushEvery" style="width:160px" value="4" />
+      </div>
+    </div>
+    <p class="small">提示：浏览器首次播放需要点一次“开始生成”后允许音频（Tone.js 需要用户手势）。</p>
+  </div>
+
+  <div class="card">
+    <div id="status" class="mono">(status)</div>
+    <div class="small" style="margin-top:10px;">
+      最新文件：
+      <a id="midiLink" href="#" target="_blank">(midi)</a>
+      ·
+      <a id="xmlLink" href="#" target="_blank">(musicxml)</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between;">
+      <div class="row">
+        <button id="playBtn" class="secondary" disabled>播放</button>
+        <button id="pauseBtn" class="secondary" disabled>暂停</button>
+        <button id="stopPlayBtn" class="secondary" disabled>停止</button>
+        <span class="pill small" id="timeLabel">00:00 / 00:00</span>
+      </div>
+      <div class="row">
+        <label class="row" style="gap:8px;">
+          <input type="checkbox" id="followLatest" checked />
+          <span class="small">跟随最新片段</span>
+        </label>
+        <label class="row" style="gap:8px;">
+          <span class="small">窗口(秒)</span>
+          <input id="windowSec" style="width:120px" value="10" />
+        </label>
+        <label class="row" style="gap:8px;">
+          <span class="small">音域</span>
+          <input id="pitchRange" style="width:160px" value="36-96" />
+        </label>
+      </div>
+    </div>
+    <div class="small" style="margin-top:10px;">
+      <div class="row" style="align-items:center;">
+        <span>当前展示 MIDI：</span>
+        <input id="midiUrlInput" style="min-width:520px;" placeholder="/files/stream_current.mid?rev=... 或 http(s)://..." />
+        <button id="loadMidiBtn" class="secondary">加载</button>
+        <a id="rollMidiUrl" href="#" target="_blank">打开</a>
+      </div>
+    </div>
+    <div style="margin-top:12px;">
+      <input id="progress" type="range" min="0" max="1" step="0.001" value="0" style="width:100%;" disabled />
+    </div>
+    <div style="margin-top:12px;">
+      <canvas id="rollCanvas"></canvas>
+      <div class="small" style="margin-top:8px; opacity:.8;">
+        说明：这是简易 piano-roll（卷帘窗）。横轴=时间，纵轴=音高；白色竖线是播放头。拖动进度条可跳转。
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statusEl = document.getElementById('status');
+    const midiLink = document.getElementById('midiLink');
+    const xmlLink = document.getElementById('xmlLink');
+
+    const ckptEl = document.getElementById('ckpt');
+    const maxStepsEl = document.getElementById('maxSteps');
+    const delayMsEl = document.getElementById('delayMs');
+    const flushEveryEl = document.getElementById('flushEvery');
+
+    const autoPlayEl = document.getElementById('autoPlay');
+
+    const playBtn = document.getElementById('playBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const stopPlayBtn = document.getElementById('stopPlayBtn');
+    const progressEl = document.getElementById('progress');
+    const timeLabelEl = document.getElementById('timeLabel');
+    const canvas = document.getElementById('rollCanvas');
+    const windowSecEl = document.getElementById('windowSec');
+    const pitchRangeEl = document.getElementById('pitchRange');
+    const rollMidiUrlEl = document.getElementById('rollMidiUrl');
+    const midiUrlInputEl = document.getElementById('midiUrlInput');
+    const loadMidiBtn = document.getElementById('loadMidiBtn');
+    const followLatestEl = document.getElementById('followLatest');
+
+    let lastRevision = -1;
+
+    // current midi state
+    let currentMidi = null;
+    let currentNotes = []; // flattened
+    let midiDuration = 0;
+    let isSeeking = false;
+
+    // playback state
+    let synths = [];
+    let lastRenderedUrl = null;
+    let scheduledUrl = null;
+
+    async function fetchJson(url, opts) {
+      const res = await fetch(url, opts);
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`${res.status}: ${txt}`);
+      }
+      return await res.json();
+    }
+
+    function fmtTime(sec) {
+      sec = Math.max(0, Number(sec) || 0);
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    }
+
+    function parsePitchRange(text) {
+      const m = String(text || '').trim().match(/^(\d+)\s*-\s*(\d+)$/);
+      if (!m) return { low: 36, high: 96 };
+      let low = Math.max(0, Math.min(127, parseInt(m[1], 10)));
+      let high = Math.max(0, Math.min(127, parseInt(m[2], 10)));
+      if (high < low) [low, high] = [high, low];
+      if (high === low) high = Math.min(127, low + 1);
+      return { low, high };
+    }
+
+    function resizeCanvasToDisplaySize(c) {
+      const rect = c.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(1, Math.floor(rect.width * dpr));
+      const h = Math.max(1, Math.floor(rect.height * dpr));
+      if (c.width !== w || c.height !== h) {
+        c.width = w;
+        c.height = h;
+      }
+      return { w, h, dpr };
+    }
+
+    function buildFlattenedNotes(midi) {
+      const colors = ['#60a5fa', '#34d399', '#fbbf24', '#f472b6'];
+      const flat = [];
+      midi.tracks.forEach((track, ti) => {
+        track.notes.forEach((n) => {
+          flat.push({
+            t: Number(n.time) || 0,
+            d: Math.max(0.01, Number(n.duration) || 0.05),
+            p: Number(n.midi) || 0,
+            v: Math.min(1, Math.max(0.05, Number(n.velocity) || 0.8)),
+            c: colors[ti % colors.length],
+            ti
+          });
+        });
+      });
+      flat.sort((a,b) => a.t - b.t);
+      return flat;
+    }
+
+    function renderRoll(currentSec) {
+      const { w, h } = resizeCanvasToDisplaySize(canvas);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.clearRect(0, 0, w, h);
+
+      // empty state
+      if (!currentMidi || currentNotes.length === 0) {
+        ctx.fillStyle = '#9aa4b2';
+        ctx.font = '14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+        ctx.fillText('等待 MIDI…', 16, 24);
+        return;
+      }
+
+      const windowSec = Math.max(2, Math.min(60, parseFloat(windowSecEl.value || '10') || 10));
+      const pr = parsePitchRange(pitchRangeEl.value);
+      const low = pr.low;
+      const high = pr.high;
+      const pitchSpan = Math.max(1, high - low);
+
+      // 卷帘窗：让播放头尽量在窗口中间
+      const center = windowSec * 0.5;
+      const startT = Math.max(0, currentSec - center);
+      const endT = startT + windowSec;
+      const pxPerSec = w / windowSec;
+
+      // grid
+      ctx.save();
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = '#162036';
+      ctx.lineWidth = 1;
+
+      // vertical grid every 1s
+      for (let s = Math.ceil(startT); s <= Math.floor(endT); s++) {
+        const x = (s - startT) * pxPerSec;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+      }
+      // horizontal grid every octave
+      for (let p = Math.ceil(low / 12) * 12; p <= high; p += 12) {
+        const y = h - ((p - low) / pitchSpan) * h;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // notes
+      const noteH = Math.max(2, h / (pitchSpan + 1));
+      for (const n of currentNotes) {
+        const nt0 = n.t;
+        const nt1 = n.t + n.d;
+        if (nt1 < startT || nt0 > endT) continue;
+        if (n.p < low || n.p > high) continue;
+
+        const x0 = (nt0 - startT) * pxPerSec;
+        const x1 = (nt1 - startT) * pxPerSec;
+        const y = h - ((n.p - low) / pitchSpan) * h;
+        const hh = Math.max(2, noteH * 0.9);
+        const yy = Math.max(0, Math.min(h - hh, y - hh));
+
+        ctx.fillStyle = n.c;
+        ctx.globalAlpha = 0.25 + 0.6 * n.v;
+        ctx.fillRect(x0, yy, Math.max(1, x1 - x0), hh);
+      }
+      ctx.globalAlpha = 1;
+
+      // playhead
+      const playX = (currentSec - startT) * pxPerSec;
+      ctx.strokeStyle = '#e5e7eb';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(playX, 0);
+      ctx.lineTo(playX, h);
+      ctx.stroke();
+    }
+
+    function disposeSynths() {
+      synths.forEach(s => {
+        try { s.dispose(); } catch (e) {}
+      });
+      synths = [];
+    }
+
+    async function ensureAudioUnlocked() {
+      try {
+        await Tone.start();
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function stopPlayback() {
+      try {
+        Tone.Transport.stop();
+        Tone.Transport.cancel(0);
+        Tone.Transport.seconds = 0;
+      } catch (e) {}
+      progressEl.value = '0';
+      renderRoll(0);
+      timeLabelEl.textContent = `${fmtTime(0)} / ${fmtTime(midiDuration)}`;
+    }
+
+    function clearScheduleKeepPosition() {
+      const sec = Math.max(0, Number(Tone.Transport.seconds) || 0);
+      const state = Tone.Transport.state;
+      try {
+        Tone.Transport.cancel(0);
+        Tone.Transport.seconds = sec;
+      } catch (e) {}
+      return { sec, state };
+    }
+
+    async function loadMidiFromUrl(url, { initialSec = 0 } = {}) {
+      const res = await fetch(url);
+      const buf = await res.arrayBuffer();
+      const midi = new Midi(buf);
+      currentMidi = midi;
+      currentNotes = buildFlattenedNotes(midi);
+      midiDuration = Math.max(0, Number(midi.duration) || 0);
+
+      // show currently visualized midi url
+      rollMidiUrlEl.href = url;
+      rollMidiUrlEl.textContent = '打开';
+      midiUrlInputEl.value = url;
+
+      progressEl.disabled = false;
+      progressEl.min = '0';
+      progressEl.max = String(Math.max(0.001, midiDuration));
+      progressEl.step = '0.001';
+      playBtn.disabled = false;
+      pauseBtn.disabled = false;
+      stopPlayBtn.disabled = false;
+
+      // update view (keep current progress if requested)
+      const sec = Math.max(0, Math.min(Number(initialSec) || 0, midiDuration || 0));
+      if (!isSeeking) {
+        progressEl.value = String(sec);
+      }
+      renderRoll(sec);
+      timeLabelEl.textContent = `${fmtTime(sec)} / ${fmtTime(midiDuration)}`;
+      return midi;
+    }
+
+    function schedulePlayback(midi, { fromSec = 0 } = {}) {
+      // streaming-friendly: do NOT stop/reset transport.
+      // just cancel old events and schedule notes that happen at/after fromSec.
+      const keep = clearScheduleKeepPosition();
+      disposeSynths();
+
+      const from = Math.max(0, Number(fromSec) || 0);
+      const nowSec = Math.max(0, Number(keep.sec) || 0);
+      const eps = 0.002;
+
+      const trackCount = Math.max(1, midi.tracks.length);
+      for (let i = 0; i < trackCount; i++) {
+        const s = new Tone.PolySynth(Tone.Synth).toDestination();
+        synths.push(s);
+      }
+
+      midi.tracks.forEach((track, ti) => {
+        const synth = synths[ti % synths.length];
+        track.notes.forEach((n) => {
+          const t = Math.max(0, Number(n.time) || 0);
+          const d = Math.max(0.03, Number(n.duration) || 0.05);
+          const v = Math.min(1, Math.max(0.05, Number(n.velocity) || 0.8));
+
+          const end = t + d;
+          // already fully in the past
+          if (end < from - 0.02) return;
+
+          // If the note started in the past but is still sounding at `from`,
+          // re-trigger it at `from` for the remaining duration so audio stays continuous.
+          let schedT = t;
+          let schedD = d;
+          if (t < from && end > from) {
+            schedT = from;
+            schedD = Math.max(0.03, end - from);
+          }
+
+          // Never schedule strictly before current transport time.
+          schedT = Math.max(schedT, nowSec + eps);
+
+          Tone.Transport.schedule((time) => {
+            synth.triggerAttackRelease(Tone.Frequency(n.midi, 'midi'), schedD, time, v);
+          }, schedT);
+        });
+      });
+
+      // keep transport state as-is
+      try {
+        Tone.Transport.seconds = keep.sec;
+        if (keep.state === 'started' && Tone.Transport.state !== 'started') {
+          Tone.Transport.start('+0.01');
+        }
+      } catch (e) {}
+
+      scheduledUrl = lastRenderedUrl;
+    }
+
+    async function playMidiFromUrl(url, { auto = true, preservePosition = true } = {}) {
+      // 避免重复加载同一个 rev 的链接
+      lastRenderedUrl = url;
+      const prevSec = Math.max(0, Number(Tone.Transport.seconds) || 0);
+      const wasStarted = Tone.Transport.state === 'started';
+      const initialSec = preservePosition ? prevSec : 0;
+
+      const midi = await loadMidiFromUrl(url, { initialSec });
+
+      // Only schedule audio if we can unlock AudioContext.
+      // This allows polling to keep updating the visualization/links even before user gesture.
+      const needAudio = (auto && autoPlayEl.checked) || wasStarted;
+      const audioOk = needAudio ? await ensureAudioUnlocked() : false;
+      if (audioOk) {
+        schedulePlayback(midi, { fromSec: preservePosition ? prevSec : 0 });
+      } else {
+        scheduledUrl = null;
+      }
+
+      // restore/adjust transport position
+      try {
+        Tone.Transport.seconds = Math.max(0, Math.min(initialSec, midiDuration || initialSec));
+      } catch (e) {}
+
+      const shouldAuto = auto && autoPlayEl.checked;
+      if (shouldAuto) {
+        if (Tone.Transport.state !== 'started') {
+          // if audio isn't unlocked yet, Transport.start() may be ignored; that's ok.
+          try { Tone.Transport.start('+0.02'); } catch (e) {}
+        }
+      } else {
+        // if it was playing, keep playing (stream updates shouldn't force pause)
+        if (wasStarted && Tone.Transport.state !== 'started') {
+          try { Tone.Transport.start('+0.02'); } catch (e) {}
+        }
+      }
+    }
+
+    async function poll() {
+      try {
+        const s = await fetchJson('/api/status');
+        statusEl.textContent = JSON.stringify(s, null, 2);
+
+        if (s.midi_url) {
+          midiLink.href = s.midi_url;
+          midiLink.textContent = s.midi_url;
+        }
+        if (s.musicxml_url) {
+          xmlLink.href = s.musicxml_url;
+          xmlLink.textContent = s.musicxml_url;
+        }
+
+        startBtn.disabled = s.running;
+        stopBtn.disabled = !s.running;
+
+        if (s.revision !== undefined && s.revision !== null) {
+          if (s.revision > lastRevision && s.midi_url) {
+            lastRevision = s.revision;
+            // 新片段到达：是否跟随最新由开关决定
+            if (followLatestEl.checked) {
+              // 新片段到达：保持当前播放进度，不要从头播放
+              await playMidiFromUrl(s.midi_url, { auto: true, preservePosition: true });
+            }
+          }
+        }
+      } catch (e) {
+        statusEl.textContent = String(e);
+      }
+    }
+
+    // transport -> UI loop
+    function uiTick() {
+      try {
+        const dur = Math.max(0, midiDuration);
+        const cur = Math.max(0, Number(Tone.Transport.seconds) || 0);
+        if (!isSeeking) {
+          progressEl.value = String(Math.min(dur || 1, cur));
+        }
+        timeLabelEl.textContent = `${fmtTime(cur)} / ${fmtTime(dur)}`;
+        renderRoll(cur);
+      } catch (e) {}
+      requestAnimationFrame(uiTick);
+    }
+    requestAnimationFrame(uiTick);
+
+    // playback controls
+    playBtn.addEventListener('click', async () => {
+      if (!currentMidi) {
+        alert('还没有 MIDI，先开始生成或等待首次 flush');
+        return;
+      }
+      const ok = await ensureAudioUnlocked();
+      if (!ok) {
+        alert('浏览器阻止了自动音频播放：请先与页面交互（点击一次）后再试');
+        return;
+      }
+      // if we loaded/updated MIDI while audio was locked, schedule now.
+      if (scheduledUrl !== lastRenderedUrl) {
+        schedulePlayback(currentMidi, { fromSec: Math.max(0, Number(Tone.Transport.seconds) || 0) });
+      }
+      if (Tone.Transport.state !== 'started') {
+        Tone.Transport.start('+0.02');
+      }
+    });
+    pauseBtn.addEventListener('click', () => {
+      try {
+        if (Tone.Transport.state === 'started') Tone.Transport.pause();
+      } catch (e) {}
+    });
+    stopPlayBtn.addEventListener('click', () => {
+      stopPlayback();
+    });
+
+    // progress bar seeking
+    progressEl.addEventListener('input', () => {
+      isSeeking = true;
+      const v = parseFloat(progressEl.value || '0') || 0;
+      renderRoll(v);
+      timeLabelEl.textContent = `${fmtTime(v)} / ${fmtTime(midiDuration)}`;
+    });
+    progressEl.addEventListener('change', () => {
+      try {
+        const v = parseFloat(progressEl.value || '0') || 0;
+        Tone.Transport.seconds = Math.max(0, v);
+      } catch (e) {}
+      isSeeking = false;
+    });
+
+    window.addEventListener('resize', () => {
+      renderRoll(Number(Tone.Transport.seconds) || 0);
+    });
+
+    // manual midi url load
+    loadMidiBtn.addEventListener('click', async () => {
+      const url = (midiUrlInputEl.value || '').trim();
+      if (!url) {
+        alert('请输入 MIDI 链接');
+        return;
+      }
+      try {
+        // 手动加载：默认从头开始（更符合“换歌”直觉）
+        await playMidiFromUrl(url, { auto: false, preservePosition: false });
+      } catch (e) {
+        alert(String(e));
+      }
+    });
+
+    startBtn.addEventListener('click', async () => {
+      const payload = {
+        checkpoint: ckptEl.value,
+        max_steps: parseInt(maxStepsEl.value || '512', 10),
+        token_delay_ms: parseInt(delayMsEl.value || '40', 10),
+        flush_every_steps: parseInt(flushEveryEl.value || '4', 10)
+      };
+      try {
+        await fetchJson('/api/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+      } catch (e) {
+        alert(String(e));
+      }
+      // user gesture: try to unlock audio early for seamless autoplay
+      await ensureAudioUnlocked();
+      await poll();
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      try {
+        await fetchJson('/api/stop', { method: 'POST' });
+      } catch (e) {
+        alert(String(e));
+      }
+      await poll();
+    });
+
+    setInterval(poll, 800);
+    poll();
+  </script>
+</body>
+</html>

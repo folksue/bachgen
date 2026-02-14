@@ -4,6 +4,21 @@ from typing import Iterable, List, Optional
 
 @dataclass
 class ChoraleTokenizer:
+    """Tokenizer for a fixed 4-part chorale representation.
+
+    Representation (token stream):
+
+    - BOS, then repeated blocks of: TIME, NOTE(S), NOTE(A), NOTE(T), NOTE(B), then EOS
+    - NOTE values are MIDI pitches 0..127; a dedicated REST value (default 128) encodes silence
+
+    Integer ID mapping:
+
+    - 0..3 are reserved for PAD/BOS/EOS/TIME
+    - NOTE(p) is stored as `note_offset + p`
+    - vocab_size = note_offset + (rest_value + 1)
+
+    This keeps the model purely categorical and easy to decode back into per-step SATB pitches.
+    """
     pad_id: int = 0
     bos_id: int = 1
     eos_id: int = 2

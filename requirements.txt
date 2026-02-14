@@ -2,3 +2,5 @@ torch
 numpy
 pandas
 music21
+fastapi
+uvicorn

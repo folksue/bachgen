@@ -2,16 +2,79 @@
 
 This project trains a Transformer language model for polyphonic Bach chorales and generates new samples as MIDI and MusicXML.
 
-## Representation Choice
+## Representation Choice (Symbolic)
 
-We use a simple event-based symbolic representation tailored to 4-part chorales. Each time step contains a TIME token followed by four voice tokens (S, A, T, B). Each voice token is a MIDI pitch value (0-127). A special REST value 128 indicates silence.
+### Summary
+This repo uses a **token-based, event-style symbolic representation** tailored to **fixed 4-part (SATB) chorales**.
 
-Token layout:
+Each discrete time step is encoded as a small block:
 
-- BOS, then repeated blocks of: TIME, note0, note1, note2, note3, then EOS
-- All tokens are mapped to integer IDs for the Transformer LM
+> `TIME` → `S` → `A` → `T` → `B`
 
-This keeps the model causal and easy to decode back into a 4-part score.
+Where each voice token is a **single MIDI pitch** (0–127) and `REST=128` represents silence.
+
+### Token set / vocabulary
+The tokenizer is implemented in [src/representation.py](src/representation.py).
+
+Special tokens:
+
+- `PAD = 0` (padding, reserved)
+- `BOS = 1` (start of sequence)
+- `EOS = 2` (end of sequence)
+- `TIME = 3` (start of a new time step)
+
+Note tokens:
+
+- `NOTE(p)` where $p \in [0, 128]$ and `p=128` means REST
+
+Mapping to integer IDs:
+
+- `NOTE(p)` is stored as `id = 4 + p`
+- `vocab_size = 4 + (128 + 1) = 133`
+
+### Sequence structure
+Given a chorale with $T$ time steps (rows in the CSV), the sequence is:
+
+`BOS`, then for each step $t$:
+
+`TIME, NOTE(S_t), NOTE(A_t), NOTE(T_t), NOTE(B_t)`
+
+then `EOS`.
+
+This produces a single 1D stream for a **causal language model** trained with standard next-token prediction.
+
+### Key design choices (justification)
+
+**Why token-based / event-style (vs. piano-roll)?**
+
+- **Causal generation is natural**: the model learns $p(x_i \mid x_{<i})$.
+- **Compact and simple**: one step = 5 tokens, without multi-label pitch sets.
+- **Easy decoding** back into a 4-part score, with explicit step boundaries.
+
+**Why an explicit `TIME` delimiter?**
+
+- Makes boundaries unambiguous and decoding robust.
+- Helps the model learn a stable grid: each `TIME` means “advance one frame”.
+
+**Why fixed voice order (SATB) and 1 token per voice?**
+
+- Chorales in this dataset are consistently 4-part.
+- Fixed ordering encodes voice identity implicitly and avoids permutation ambiguity.
+
+**Why MIDI pitch + REST=128?**
+
+- MIDI pitch is a standard integer scale for symbolic music.
+- A dedicated REST value keeps the vocabulary small and avoids separate note-off events.
+
+### Conditioning (current & extensibility)
+Current training/generation in this repo is **unconditional**: the model only conditions on past tokens.
+
+If you want conditioning later (e.g., key, meter, a given soprano line), you can prepend/insert control tokens such as `KEY_*`, `METER_*`, or per-step constraints before the voices. This keeps the objective unchanged while enabling controllability.
+
+### Limitations / trade-offs
+- Fixed 4-voice structure (not directly applicable to arbitrary polyphony).
+- Time grid is assumed by the CSV; expressive timing and overlaps are not represented.
+- Durations are implicit via repeated pitches across consecutive steps (see the incremental merging logic in [src/stream_web.py](src/stream_web.py)).
 
 ## Route A: From Scratch (this repo)
 
@@ -30,7 +93,7 @@ python -m src.train --data-dir data/train --out-dir runs/from_scratch
 
 ### 3) Generate
 ```
-python -m src.generate --checkpoint runs/from_scratch/model.pt --out-dir outputs
+python -m src.generate --checkpoint runs/from_scratch/model_epoch_20.pt --out-dir outputs
 ```
 
 Outputs:
@@ -55,4 +118,4 @@ If you want, I can add a full fine-tuning script for either option once you conf
 
 ## Notes
 - Export to MusicXML uses `music21`, so the result opens cleanly in MuseScore.
-- You can adjust `step-duration` during generation to control rhythmic density.
+- You can adjust `temperature` / `top_k` during generation to trade off diversity vs. stability.
