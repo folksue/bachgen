@@ -114,7 +114,7 @@ High-level steps:
 ### Option B2: Music-specific pretrained model (recommended if you have compute)
 For SOTA-style fine-tuning on symbolic music, you can use a music-specific model (e.g., Music Transformer or REMI-based checkpoints). If you have access to a checkpoint, plug in its tokenizer and finetune on chorales by mapping to its tokenization (usually REMI or CP). This can improve musical coherence over a general LM baseline.
 
-If you want, I can add a full fine-tuning script for either option once you confirm the target checkpoint.
+
 
 ## Notes
 - Export to MusicXML uses `music21`, so the result opens cleanly in MuseScore.
