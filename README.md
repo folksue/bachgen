@@ -79,7 +79,10 @@ If you want conditioning later (e.g., key, meter, a given soprano line), you can
 ## Route A: From Scratch (this repo)
 
 ### 1) Prepare Data
-Place CSV files with columns `note0,note1,note2,note3` under `data/train/` (and optionally `data/val/`).
+Place CSV files with columns `note0,note1,note2,note3` under:
+
+- `data/train/` (training set)
+- `data/valid/` (validation set)
 
 Example:
 ```
@@ -87,11 +90,13 @@ Example:
 ```
 
 ### 2) Train
+`src/train.py` will use **validation NLL (cross-entropy)** as the model selection criterion and save a `*_best.pt` checkpoint.
+
 ```
-python -m src.train --data-dir data/train --out-dir runs/from_scratch
+python -m src.train --data-dir data --out-dir runs/from_scratch
 ```
 
-### 3) Generate
+### 3) Generate (offline, non-streaming)
 ```
 python -m src.generate --checkpoint runs/from_scratch/model_epoch_20.pt --out-dir outputs
 ```
@@ -99,6 +104,13 @@ python -m src.generate --checkpoint runs/from_scratch/model_epoch_20.pt --out-di
 Outputs:
 - `outputs/sample_000.mid`
 - `outputs/sample_000.musicxml`
+
+### 4) Generate (streaming, optional)
+If you still want the live/streaming UI later, use:
+
+```
+python -m src.stream_web
+```
 
 ## Route B: Fine-Tune a Pretrained Model (two options)
 

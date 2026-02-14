@@ -13,11 +13,11 @@ venv/
 
 # Training artifacts
 runs/**
-outputs/
+# outputs/
 *.pt
 
 # Keep a single reference checkpoint tracked (ignore all other .pt files)
 !runs/
 !runs/from_scratch/
-!runs/from_scratch/model_epoch_20.pt
+!runs/from_scratch/model_epoch_49_best.pt
 

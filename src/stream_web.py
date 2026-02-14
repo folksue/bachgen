@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 # Allow running as a script (python src/stream_web.py) by falling back to absolute imports
 try:
-    from .generate import sample_next
+    from .generation_utils import load_model_config, load_tokenizer, sample_next
     from .midi_utils import score_from_merged_events, write_outputs
     from .model import ChoraleTransformerLM, ModelConfig
     from .representation import ChoraleTokenizer
@@ -24,7 +24,7 @@ except ImportError:
     project_root = Path(__file__).resolve().parent.parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
-    from src.generate import sample_next
+    from src.generation_utils import load_model_config, load_tokenizer, sample_next
     from src.midi_utils import score_from_merged_events, write_outputs
     from src.model import ChoraleTransformerLM, ModelConfig
     from src.representation import ChoraleTokenizer
@@ -138,36 +138,6 @@ _status_lock = threading.Lock()
 _status = StreamStatus()
 _stop_flag = threading.Event()
 _worker_thread: Optional[threading.Thread] = None
-
-
-def _load_tokenizer(checkpoint_path: Path) -> ChoraleTokenizer:
-    tokenizer_path = checkpoint_path.parent / "tokenizer.json"
-    if tokenizer_path.exists():
-        with open(tokenizer_path, "r", encoding="utf-8") as f:
-            tok_cfg = json.load(f)
-        return ChoraleTokenizer(
-            pad_id=tok_cfg["pad_id"],
-            bos_id=tok_cfg["bos_id"],
-            eos_id=tok_cfg["eos_id"],
-            time_id=tok_cfg["time_id"],
-            rest_value=tok_cfg["rest_value"],
-        )
-    return ChoraleTokenizer()
-
-
-def _load_model_config(checkpoint_path: Path, tokenizer: ChoraleTokenizer) -> ModelConfig:
-    config_path = checkpoint_path.parent / "model_config.json"
-    if not config_path.exists():
-        return ModelConfig(vocab_size=tokenizer.vocab_size)
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    allowed_keys = set(ModelConfig.__dataclass_fields__.keys())
-    filtered = {k: v for k, v in cfg.items() if k in allowed_keys}
-    if "vocab_size" not in filtered:
-        filtered["vocab_size"] = tokenizer.vocab_size
-    return ModelConfig(**filtered)
-
-
 def _write_snapshot(merger: IncrementalMerger, step_duration: float, basename: str) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     score = score_from_merged_events(merger.snapshot_events(include_open_runs=True), step_duration=step_duration)
@@ -179,8 +149,8 @@ def _generation_worker(req: StartRequest) -> None:
     checkpoint_path = Path(req.checkpoint)
 
     try:
-        tokenizer = _load_tokenizer(checkpoint_path)
-        config = _load_model_config(checkpoint_path, tokenizer)
+        tokenizer = load_tokenizer(checkpoint_path)
+        config = load_model_config(checkpoint_path, tokenizer)
         model = ChoraleTransformerLM(config).to(req.device)
         model.load_state_dict(torch.load(checkpoint_path, map_location=req.device))
         model.eval()
