@@ -271,7 +271,33 @@ def main() -> None:
             "vocab_size": tokenizer.vocab_size,
         }, f, indent=2)
 
+    # 同时写一份到仓库根目录 artifacts/<run_name>/，避免被 runs/** 的 .gitignore 忽略
+    repo_root = Path(__file__).resolve().parent.parent
+    artifact_dir = repo_root / "artifacts" / out_dir.name
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    with open(artifact_dir / "tokenizer.json", "w", encoding="utf-8") as f:
+        json.dump({
+            "pad_id": tokenizer.pad_id,
+            "bos_id": tokenizer.bos_id,
+            "eos_id": tokenizer.eos_id,
+            "time_id": tokenizer.time_id,
+            "rest_value": tokenizer.rest_value,
+            "vocab_size": tokenizer.vocab_size,
+        }, f, indent=2)
+
     with open(out_dir / "model_config.json", "w", encoding="utf-8") as f:
+        json.dump({
+            "vocab_size": config.vocab_size,
+            "d_model": config.d_model,
+            "n_head": config.n_head,
+            "n_layer": config.n_layer,
+            "dropout": config.dropout,
+            "max_len": config.max_len,
+            "best_epoch": best_epoch,
+            "best_val_loss": best_val_loss,
+        }, f, indent=2)
+
+    with open(artifact_dir / "model_config.json", "w", encoding="utf-8") as f:
         json.dump({
             "vocab_size": config.vocab_size,
             "d_model": config.d_model,

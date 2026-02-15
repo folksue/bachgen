@@ -1,0 +1,8 @@
+{
+  "pad_id": 0,
+  "bos_id": 1,
+  "eos_id": 2,
+  "time_id": 3,
+  "rest_value": 128,
+  "vocab_size": 133
+}

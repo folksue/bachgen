@@ -1,0 +1,10 @@
+{
+  "vocab_size": 133,
+  "d_model": 128,
+  "n_head": 4,
+  "n_layer": 2,
+  "dropout": 0.2,
+  "max_len": 256,
+  "best_epoch": 18,
+  "best_val_loss": 0.4246987089514732
+}
