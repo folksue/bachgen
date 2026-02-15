@@ -45,26 +45,84 @@ def main() -> None:
 
     model, tokenizer, config = load_model_from_checkpoint(checkpoint_path, args.device)
 
-    # 关键点：虽然模型的 learned positional embedding 只支持长度 config.max_len，
-    # 但我们可以用“滑动窗口”继续生成：每一步只把最近的 max_len 个 token 喂给模型。
-    # generation_utils.generate_tokens() 已实现该滑动窗口逻辑，因此这里不再把生成长度截断到 max_len。
+    max_context_len = int(config.max_len)
     max_timesteps = int(args.max_timesteps) if args.max_timesteps is not None else None
+    
+    # 分段生成逻辑：每段最多生成 (max_context_len - 1) 个新 token，
+    # 末尾保留 10 个 token 作为下一段的 context overlap（2个 block）
+    overlap_tokens = 10
+    tokens_per_segment = max_context_len - 1 - overlap_tokens
+    
     if max_timesteps is not None:
-        # 仅用于兜底上限：真实停止由 generation_utils 通过 max_timesteps 控制。
-        max_steps = max(int(args.max_steps), max_timesteps * 5 + 8)
+        target_timesteps = int(max_timesteps)
+        # 每个 timestep = 1 TIME + 4 NOTE = 5 token
+        # 所以需要约 target_timesteps * 5 个 token（加上 BOS 和可能的 EOS）
+        target_tokens = target_timesteps * 5 + 2
     else:
-        max_steps = int(args.max_steps)
-    tokens = generate_tokens(
+        target_tokens = int(args.max_steps)
+    
+    # 第一段：从 BOS 开始生成
+    all_tokens = generate_tokens(
         model,
         tokenizer,
-        max_tokens=max_steps,
+        max_tokens=tokens_per_segment,
         temperature=args.temperature,
         top_k=args.top_k,
         device=args.device,
         min_tokens_before_eos=args.min_tokens_before_eos,
-        max_timesteps=max_timesteps,
+        max_timesteps=None,
         enforce_structure=bool(args.enforce_structure),
     )
+    
+    # 分段生成后续段落
+    while len(all_tokens) < target_tokens:
+        # 检查是否已经以 EOS 结尾（生成完毕）
+        if all_tokens and all_tokens[-1] == tokenizer.eos_id:
+            break
+        
+        # 提取末尾 overlap 作为下一段的 initial_tokens
+        # 保留最后 overlap_tokens 个 token + BOS
+        if len(all_tokens) > overlap_tokens:
+            context_for_next = [tokenizer.bos_id] + all_tokens[-(overlap_tokens):]
+        else:
+            context_for_next = all_tokens
+        
+        # 计算这一段还要生成多少 token
+        remaining_tokens = target_tokens - len(all_tokens)
+        max_new_tokens = min(tokens_per_segment, remaining_tokens)
+        
+        # 检查目标 timesteps 是否已满足
+        if max_timesteps is not None:
+            current_timesteps = sum(1 for token in all_tokens if token == tokenizer.time_id)
+            remaining_timesteps = target_timesteps - current_timesteps
+            if remaining_timesteps <= 0:
+                all_tokens.append(tokenizer.eos_id)
+                break
+        
+        # 生成下一段
+        segment = generate_tokens(
+            model,
+            tokenizer,
+            max_tokens=max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            device=args.device,
+            min_tokens_before_eos=args.min_tokens_before_eos,
+            max_timesteps=None,
+            enforce_structure=bool(args.enforce_structure),
+            initial_tokens=context_for_next,
+        )
+        
+        # 拼接：去掉 initial_tokens 部分，只保留新生成的部分
+        # segment 从 context_for_next 开始，所以新内容从索引 len(context_for_next) 开始
+        new_content = segment[len(context_for_next):]
+        all_tokens.extend(new_content)
+        
+        # 如果这一段以 EOS 结尾，停止生成
+        if new_content and new_content[-1] == tokenizer.eos_id:
+            break
+    
+    tokens = all_tokens
     timesteps = tokenizer.decode_timesteps(tokens)
     score = score_from_timesteps(timesteps, step_duration=args.step_duration)
     write_outputs(score, out_dir, "sample_000")

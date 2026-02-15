@@ -44,10 +44,19 @@ def generate_tokens(
     min_tokens_before_eos: int = 0,
     max_timesteps: int | None = None,
     enforce_structure: bool = True,
+    initial_tokens: List[int] | None = None,
 ) -> List[int]:
-    """Non-streaming token-by-token generation (returns the full token list)."""
+    """Non-streaming token-by-token generation (returns the full token list).
+    
+    Args:
+        initial_tokens: If provided, start generation from these tokens instead of [BOS].
+                       Used for segmented generation (continuation from previous segments).
+    """
     model.eval()
-    tokens: List[int] = [int(tokenizer.bos_id)]
+    if initial_tokens is None:
+        tokens: List[int] = [int(tokenizer.bos_id)]
+    else:
+        tokens: List[int] = list(initial_tokens)
 
     # Learned positional embeddings are limited to config.max_len.
     max_context_len = int(getattr(model, "config", ModelConfig(vocab_size=tokenizer.vocab_size)).max_len)
@@ -63,14 +72,60 @@ def generate_tokens(
         masked[allowed_ids] = logits[allowed_ids]
         return masked
 
+    # 初始化 expecting_time, note_idx, steps_done 基于 initial_tokens
     expecting_time = True
     note_idx = 0
     steps_done = 0
+    
+    if initial_tokens is not None and len(initial_tokens) > 1:
+        # 根据最后一个 token 判断期望下一个是什么
+        # 首先计算 initial_tokens 中已有的完整 timestep 数
+        steps_done = sum(1 for t in initial_tokens if t == int(tokenizer.time_id))
+        
+        # 找出最后一个完整的 block 或当前不完整 block 的位置
+        last_time_idx = -1
+        for i in range(len(initial_tokens) - 1, -1, -1):
+            if initial_tokens[i] == int(tokenizer.time_id):
+                last_time_idx = i
+                break
+        
+        if last_time_idx == -1:
+            # 没有找到 TIME token，应该只有 BOS
+            expecting_time = True
+            note_idx = 0
+        else:
+            # 计算从 last_time_idx 开始有多少个 NOTE token
+            tokens_after_time = len(initial_tokens) - last_time_idx - 1
+            if tokens_after_time == 0:
+                # 刚刚生成了 TIME, 下面应该是第一个 NOTE
+                expecting_time = False
+                note_idx = 0
+            elif tokens_after_time < 4:
+                # 已经生成了一些 NOTE，还需要更多
+                expecting_time = False
+                note_idx = tokens_after_time
+            else:
+                # 已经生成了完整的 4 个 NOTE，下一个应该是下一个 TIME
+                expecting_time = True
+                note_idx = 0
+                # 注意：这里 steps_done 已经包括了最后这个 TIME token，所以不需要再 +1
 
     with torch.no_grad():
         for _ in range(int(max_tokens)):
             if len(tokens) > max_context_len:
-                context = tokens[-max_context_len:]
+                # ── 滑动窗口：保持 block 对齐 ──
+                # token 结构: BOS [TIME S A T B]* …
+                # 必须让 context 的 positional embedding 与训练时一致：
+                #   pos 0 = BOS, pos 1 = TIME, pos 2 = S, pos 3 = A, pos 4 = T, pos 5 = B, …
+                # 做法：始终保留 BOS 在 pos 0，其余填充最近的完整+部分 block。
+                tail = tokens[1:]  # 跳过 BOS
+                usable = max_context_len - 1  # 留给 BOS 之后的空间
+                if len(tail) > usable:
+                    excess = len(tail) - usable
+                    # 向上取整到 block 边界（5 的倍数），确保裁剪后首 token = TIME
+                    trim = ((excess + 4) // 5) * 5
+                    tail = tail[trim:]
+                context = [int(tokenizer.bos_id)] + tail
             else:
                 context = tokens
             input_ids = torch.tensor(context, dtype=torch.long, device=device).unsqueeze(0)
